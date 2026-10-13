@@ -1,0 +1,14 @@
+[project]
+name = "thousandeyes-api"
+version = "0.1.0"
+description = "API HTTP sans authentification exposant les alertes ThousandEyes et le detail des tests"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "httpx>=0.27.0",
+    "pydantic-settings>=2.4.0",
+    "uvicorn[standard]>=0.30.0",
+]
+
+[dependency-groups]
+dev = []
