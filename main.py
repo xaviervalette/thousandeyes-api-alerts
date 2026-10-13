@@ -253,3 +253,60 @@ async def get_test(
     effective_aid = aid or settings.aid
     url = await test_url(client, test_id, effective_aid)
     return await te_get(client, url, {"aid": effective_aid, "expand": "agent"})
+
+
+# Selon le type de test, la cible vit dans un champ different : `url`
+# (http-server), `server` (agent-to-server), `domain` (dns-server, dns-trace),
+# `targetAgentId` (agent-to-agent). Verifie sur les 29 tests du compte.
+TARGET_FIELDS = ("url", "server", "domain", "destination", "targetAgentId")
+
+
+def test_digest(config: dict[str, Any]) -> dict[str, Any]:
+    """Resume lisible d'une configuration de test : nom, type, cible, cadence."""
+    return {
+        "testId": config.get("testId"),
+        "testName": config.get("testName"),
+        "type": config.get("type") or config.get("testType"),
+        "target": next((config[f] for f in TARGET_FIELDS if config.get(f)), None),
+        "port": config.get("port"),
+        "protocol": config.get("protocol"),
+        "interval": config.get("interval"),
+    }
+
+
+@app.get("/alerts/{alert_id}", summary="Detail d'une alerte, enrichi du test")
+async def get_alert(
+    request: Request,
+    alert_id: str,
+    aid: Annotated[str | None, Query(description="Account Group ID, surcharge TE_AID.")] = None,
+) -> dict[str, Any]:
+    """Detail d'une alerte (`GET /v7/alerts/{id}`) joint a la config de son test.
+
+    L'alerte seule ne porte ni l'URL testee, ni le nom du test : uniquement un
+    lien `_links.test.href`. On en extrait le testId et on resout la config via
+    le catalogue, ce qui donne en une requete cliente la cible reellement
+    testee (`test.target`) et l'agent declencheur (`details[]`).
+
+    Le test peut rester inaccessible (droits par catalogue, test supprime) : on
+    renvoie alors l'alerte avec `test: null` et la raison dans
+    `testUnavailable`, plutot que d'echouer en bloc.
+    """
+    client = request.app.state.client
+    effective_aid = aid or settings.aid
+    alert = await te_get(client, f"/alerts/{alert_id}", {"aid": effective_aid})
+
+    href = alert.get("_links", {}).get("test", {}).get("href")
+    test_id = href.rstrip("/").rsplit("/", 1)[-1] if href else None
+    if not test_id:
+        return {**alert, "test": None, "testUnavailable": "Alerte sans lien vers un test."}
+
+    # Le lien porte par l'alerte est deliberement ignore : pour un test
+    # Endpoint Agent il pointe vers /tests/endpoint-tests/{id}, qui repond 404.
+    try:
+        url = await test_url(client, test_id, effective_aid)
+        config = await te_get(client, url, {"aid": effective_aid, "expand": "agent"})
+    except HTTPException as exc:
+        logger.warning("Test %s de l'alerte %s non resolu: %s", test_id, alert_id, exc.detail)
+        return {**alert, "test": None, "testUnavailable": exc.detail}
+
+    return {**alert, "test": {**test_digest(config), "config": config}}
