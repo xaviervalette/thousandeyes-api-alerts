@@ -1,13 +1,15 @@
 # ThousandEyes read-only API
 
-Petit service FastAPI qui expose, **sans authentification**, deux endpoints
-au-dessus de l'API ThousandEyes v7 :
+Petit service FastAPI qui expose, **sans authentification**, quelques endpoints
+en lecture au-dessus de l'API ThousandEyes v7 :
 
 | Endpoint | Rôle | API ThousandEyes appelée |
 |---|---|---|
 | `GET /alerts` | liste des alertes | `GET /v7/alerts` |
+| `GET /alerts/{alert_id}` | détail d'une alerte, **joint à la config de son test** | `GET /v7/alerts/{id}`, puis catalogue + détail du test |
 | `GET /tests` | catalogue des tests (pour trouver un `testId`) | `GET /v7/tests` + `GET /v7/endpoint/tests/scheduled-tests` |
 | `GET /tests/{test_id}` | configuration détaillée d'un test | catalogue, puis `GET /v7/tests/{type}/{test_id}` |
+| `GET /health` | sonde de vivacité | — (aucun appel) |
 
 Le token ThousandEyes reste côté serveur : les clients (agent, n8n, script,
 dashboard) appellent ce service en HTTP nu.
@@ -76,13 +78,40 @@ Catalogue des tests (champ `unavailable` = catalogues refusés par le token) :
 curl -s localhost:8000/tests | jq '.tests[] | {testId, testName, type}'
 ```
 
-Le `testId` d'une alerte se lit aussi dans `_links.test.href` :
+### Détail d'une alerte, avec l'URL testée
+
+Une alerte v7 ne porte **ni l'URL testée, ni le nom du test** : seulement un
+lien `_links.test.href`. `GET /alerts/{alert_id}` fait la jonction côté serveur
+et renvoie l'alerte augmentée d'un bloc `test` :
 
 ```bash
-curl -s localhost:8000/alerts | jq -r '.alerts[0]._links.test.href' | sed 's#.*/##'
+curl -s localhost:8000/alerts/$(curl -s localhost:8000/alerts | jq -r '.alerts[0].id') \
+  | jq '{alertType, alertState, startDate, test: .test | del(.config), details}'
 ```
 
-Détail du test correspondant :
+```json
+{
+  "alertType": "endpoint-http-server",
+  "alertState": "clear",
+  "startDate": "2026-10-12T05:46:00Z",
+  "test": {
+    "testId": "408730",
+    "testName": "Slack - Tenant",
+    "type": "http-server",
+    "target": "https://xvalette.slack.com",
+    "port": 443, "protocol": "autodetect", "interval": 60
+  },
+  "details": [
+    { "name": "MacBook-Pro-de-xvalette", "start": { "metrics": "Error Type: \"HTTP\"" }, "state": "trigger" }
+  ]
+}
+```
+
+`test.target` est la cible réellement testée, `details[]` dit **qui** a
+déclenché et **quelle métrique** a violé. La configuration complète du test
+reste disponible sous `test.config`.
+
+Détail d'un test seul, si on a déjà son `testId` :
 
 ```bash
 curl -s localhost:8000/tests/1234567 | jq
@@ -101,6 +130,15 @@ curl -s localhost:8000/tests/1234567 | jq
   `_links.test.href` renvoyé par `/alerts` pointe vers
   `/v7/tests/endpoint-tests/{id}` — une route qui répond **404**. Suivre ce lien
   naïvement ne marche pas ; c'est pourquoi la résolution passe par le catalogue.
+- **Cible normalisée** : le champ qui porte la cible dépend du type de test —
+  `url` (http-server), `server` (agent-to-server), `domain` (dns-server,
+  dns-trace), `targetAgentId` (agent-to-agent). `test.target` expose ces cas
+  sous un nom unique.
+- **Alerte sans test exploitable** : droits par catalogue, test supprimé, ou
+  type d'alerte qui n'est pas lié à un test (`endpoint-browser-sessions-agent`
+  porte un device, pas un test, et n'a aucun lien `test`). La réponse renvoie
+  alors l'alerte avec `test: null` et la raison dans `testUnavailable`, au lieu
+  d'échouer en bloc — même logique que le champ `unavailable` de `/tests`.
 - **Erreurs** : un 401/403 de ThousandEyes est remonté en `502` avec un message
   explicite — c'est une erreur de configuration du service, pas du client. Les
   `404` et `429` sont transmis tels quels.
